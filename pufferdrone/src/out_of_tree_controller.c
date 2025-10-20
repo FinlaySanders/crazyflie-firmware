@@ -54,6 +54,7 @@ void appMain() {
 
 #include <stdlib.h>
 
+#include "puffernet.h"
 #include "drone_weights_blob.h"
 
 float a[4];
