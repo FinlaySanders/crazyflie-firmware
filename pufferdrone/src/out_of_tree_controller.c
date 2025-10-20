@@ -54,6 +54,8 @@ void appMain() {
 
 #include <stdlib.h>
 
+#include "drone_weights_blob.h"
+
 float a[4];
 
 void generate_dummy_actions(float* actions) {
