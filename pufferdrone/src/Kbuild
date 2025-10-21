@@ -1,2 +1,3 @@
 obj-y += out_of_tree_controller.o
 obj-y += puffernet.o
+obj-y += syscalls.o
