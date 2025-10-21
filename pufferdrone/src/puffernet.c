@@ -45,40 +45,8 @@ void* alloc(Arena* allocator, size_t size) {
     return ptr;
 }
 
-// File format is obtained by flattening and concatenating all pytorch layers
-typedef struct Weights Weights;
-struct Weights {
-    float* data;
-    int size;
-    int idx;
-};
-
-void _load_weights(const char* filename, float* weights, size_t num_weights) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        perror("Error opening file");
-        return;
-    }
-    fseek(file, 0, SEEK_END);
-    rewind(file);
-    size_t read_size = fread(weights, sizeof(float), num_weights, file);
-    fclose(file);
-    if (read_size != num_weights) {
-        perror("Error reading file");
-    }
-}
-
-Weights* load_weights(const char* filename, size_t num_weights) {
-    Weights* weights = pvPortCalloc(1, sizeof(Weights) + num_weights*sizeof(float));
-    weights->data = (float*)(weights + 1);
-    _load_weights(filename, weights->data, num_weights);
-    weights->size = (int)num_weights;
-    weights->idx = 0;
-    return weights;
-}
-
 float* get_weights(Weights* weights, int num_weights) {
-    float* data = &weights->data[weights->idx];
+    const float* data = &weights->data[weights->idx];
     weights->idx += num_weights;
     assert(weights->idx <= weights->size);
     return data;
