@@ -40,7 +40,7 @@ static inline void init_weights(Weights* w) {
     w->data = (const float *)(const void *)drone_weights;
     // If you also have a length in bytes, prefer that:
     // w->size = (int)(drone_weights_len / sizeof(float));
-    w->size = (int)(sizeof(drone_weights) / sizeof(float));
+    w->size = 546340;
     w->idx  = 0;
 }
 
@@ -135,14 +135,14 @@ void controllerOutOfTreeInit(void) {
     buffer_ = (int*)pvPortCalloc(1, sizeof(int));
     if (buffer_) buffer_[0] = 10;
 
-    //if (!g_weights) {
-    //    g_weights = &g_weights_storage;
-    //    init_weights(g_weights);
-    //}
+    if (!g_weights) {
+        g_weights = &g_weights_storage;
+        init_weights(g_weights);
+    }
 
     // Define your action layout for the actor head: e.g., 4 independent Gaussians
-    static const int logit_sizes[] = { 1, 1, 1, 1 }; // 4 dims -> atn_sum == 4
-    const int num_actions = (int)(sizeof(logit_sizes)/sizeof(logit_sizes[0]));
+    static const int logit_sizes[1] = {4};
+    const int num_actions = 1;
 
     net = make_linearcontlstm(g_weights, /*num_agents*/1, /*input_dim*/25,
                               logit_sizes, num_actions);
@@ -151,9 +151,9 @@ void controllerOutOfTreeInit(void) {
 void forward_linearcontlstm(LinearContLSTM *net, float *observations, float *actions) {
     linear(net->encoder, observations);
     gelu(net->gelu1, net->encoder->output);
-    //lstm(net->lstm, net->gelu1->output);
-    //linear(net->actor, net->lstm->state_h);
-    //linear(net->value_fn, net->lstm->state_h);
+    lstm(net->lstm, net->gelu1->output);
+    linear(net->actor, net->lstm->state_h);
+    linear(net->value_fn, net->lstm->state_h);
     for (int i = 0; i < net->num_actions; i++) {
         float std = expf(net->log_std[i]);
         float mean = net->actor->output[i];
