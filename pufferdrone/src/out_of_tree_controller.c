@@ -14,7 +14,7 @@
 #include "debug.h"
 
 #include "controller.h"
-#include "drone_weights_blob.h"   // extern const unsigned char drone_weights[]; extern const size_t drone_weights_len;
+#include "puffer_drone_swarm_weights.h"   // extern const unsigned char drone_weights[]; extern const size_t drone_weights_len;
 #include "portable.h"
 
 // If your port lacks pvPortCalloc, provide it HERE (and remove from puffernet.c), or vice versa.
@@ -37,10 +37,10 @@ static inline void *pvPortCalloc(size_t n, size_t size) {
 static inline void init_weights(Weights* w) {
     // Assume drone_weights is a contiguous float blob in little-endian IEEE754.
     // Cast to const float*; size is in number of floats.
-    w->data = (const float *)(const void *)drone_weights;
+    w->data = (const float *)(const void *)src_puffer_drone_swarm_weights_bin;
     // If you also have a length in bytes, prefer that:
     // w->size = (int)(drone_weights_len / sizeof(float));
-    w->size = 546340;
+    w->size = 16420/4;
     w->idx  = 0;
 }
 
@@ -108,7 +108,7 @@ LinearContLSTM *make_linearcontlstm(Weights *weights, int num_agents, int input_
     }
     net->actor = make_linear(weights, num_agents, 128, atn_sum);
     net->value_fn = make_linear(weights, num_agents, 128, 1);
-    net->lstm = make_lstm(weights, num_agents, 128, 128);
+    //net->lstm = make_lstm(weights, num_agents, 128, 128);
     return net;
 }
 
@@ -125,11 +125,11 @@ void appMain(void) {
   }
 }
 
-static void generate_dummy_actions(float* actions) {
-    for (int i = 0; i < 4; i++) {
-      actions[i] = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
-    }
-}
+//static void generate_dummy_actions(float* actions) {
+//    for (int i = 0; i < 4; i++) {
+//      actions[i] = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
+//    }
+//}
 
 void controllerOutOfTreeInit(void) {
     buffer_ = (int*)pvPortCalloc(1, sizeof(int));
@@ -144,16 +144,16 @@ void controllerOutOfTreeInit(void) {
     static const int logit_sizes[1] = {4};
     const int num_actions = 1;
 
-    net = make_linearcontlstm(g_weights, /*num_agents*/1, /*input_dim*/25,
+    net = make_linearcontlstm(g_weights, /*num_agents*/1, /*input_dim*/26,
                               logit_sizes, num_actions);
 }
 
 void forward_linearcontlstm(LinearContLSTM *net, float *observations, float *actions) {
     linear(net->encoder, observations);
     gelu(net->gelu1, net->encoder->output);
-    lstm(net->lstm, net->gelu1->output);
-    linear(net->actor, net->lstm->state_h);
-    linear(net->value_fn, net->lstm->state_h);
+    //lstm(net->lstm, net->gelu1->output);
+    linear(net->actor, net->gelu1->output);
+    //linear(net->value_fn, net->lstm->state_h);
     for (int i = 0; i < net->num_actions; i++) {
         float std = expf(net->log_std[i]);
         float mean = net->actor->output[i];
@@ -179,13 +179,13 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint,
   }
 
   // for now, use dummy actions (or build obs and call forward_*)
-  generate_dummy_actions(a);
+  //generate_dummy_actions(a);
 
   forward_linearcontlstm(net, net->obs, a);
 
   control->controlMode = controlModeForce;
-  control->normalizedForces[0] = a[0] / 3.0f + weight_at(g_weights, 0) + net->log_std[0];
-  control->normalizedForces[1] = a[1] / 3.0f + weight_at(g_weights, 100);
-  control->normalizedForces[2] = a[2] / 3.0f + weight_at(g_weights, 200);
-  control->normalizedForces[3] = a[3] / 3.0f + weight_at(g_weights, 1000);
+  control->normalizedForces[0] = a[0] / 3.0f;
+  control->normalizedForces[1] = a[1] / 3.0f;
+  control->normalizedForces[2] = a[2] / 3.0f;
+  control->normalizedForces[3] = a[3] / 3.0f;
 }
