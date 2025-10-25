@@ -165,6 +165,12 @@ bool controllerOutOfTreeTest(void) {
   return true;
 }
 
+float clampf(float val, float min, float max) {
+    if (val < min) return min;
+    if (val > max) return max;
+    return val;
+}
+
 void controllerOutOfTree(control_t *control, const setpoint_t *setpoint,
                          const sensorData_t *sensors, const state_t *state,
                          const uint32_t tick) {
@@ -181,11 +187,53 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint,
   // for now, use dummy actions (or build obs and call forward_*)
   //generate_dummy_actions(a);
 
+  // Build observation vector
+  net->obs[0] = state->velocity.x / 50.0f;
+  net->obs[1] = state->velocity.y / 50.0f;
+  net->obs[2] = state->velocity.z / 50.0f;
+
+  net->obs[3] = sensors->gyro.x / 50.0f / 180.0f * 3.14159265f;
+  net->obs[4] = sensors->gyro.y / 50.0f / 180.0f * 3.14159265f;
+  net->obs[5] = sensors->gyro.z / 50.0f / 180.0f * 3.14159265f;
+
+  net->obs[6] = state->attitudeQuaternion.w;
+  net->obs[7] = state->attitudeQuaternion.x;
+  net->obs[8] = state->attitudeQuaternion.y;
+  net->obs[9] = state->attitudeQuaternion.z;
+
+  net->obs[10] = control->normalizedForces[0];
+  net->obs[11] = control->normalizedForces[1];
+  net->obs[12] = control->normalizedForces[2];
+  net->obs[13] = control->normalizedForces[3];
+  
+  net->obs[14] = (setpoint->position.x - state->position.x) / 30.0f;
+  net->obs[15] = (setpoint->position.y - state->position.y) / 30.0f;
+  net->obs[16] = (setpoint->position.z - state->position.z) / 10.0f;
+
+  net->obs[17] = clampf(setpoint->position.x - state->position.x, -1.0f, 1.0f);
+  net->obs[18] = clampf(setpoint->position.y - state->position.y, -1.0f, 1.0f);
+  net->obs[19] = clampf(setpoint->position.z - state->position.z, -1.0f, 1.0f);
+
+  net->obs[20] = 0.0f;
+  net->obs[21] = 0.0f;
+  net->obs[22] = 0.0f;
+
+  net->obs[23] = 0.0f;
+  net->obs[24] = 0.0f;
+  net->obs[25] = 0.0f;
+
   forward_linearcontlstm(net, net->obs, a);
 
+  a[0] = clampf(a[0], -1.0f, 1.0f);
+  a[1] = clampf(a[1], -1.0f, 1.0f);
+  a[2] = clampf(a[2], -1.0f, 1.0f);
+  a[3] = clampf(a[3], -1.0f, 1.0f);
+
   control->controlMode = controlModeForce;
-  control->normalizedForces[0] = a[0] / 3.0f;
-  control->normalizedForces[1] = a[1] / 3.0f;
-  control->normalizedForces[2] = a[2] / 3.0f;
-  control->normalizedForces[3] = a[3] / 3.0f;
+  control->normalizedForces[0] = (a[0] + 1.0f) * 0.5f;
+  control->normalizedForces[1] = (a[1] + 1.0f) * 0.5f;
+  control->normalizedForces[2] = (a[2] + 1.0f) * 0.5f;
+  control->normalizedForces[3] = (a[3] + 1.0f) * 0.5f;
+
+  //(actions[i] + 1.0f) * 0.5f;
 }
