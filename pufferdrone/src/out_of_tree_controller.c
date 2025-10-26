@@ -14,7 +14,7 @@
 #include "debug.h"
 
 #include "controller.h"
-#include "puffer_drone_swarm_weights.h"   // extern const unsigned char drone_weights[]; extern const size_t drone_weights_len;
+#include "puffer_drone_swarm_weights.h"   // src_puffer_drone_swarm_weights_bin, _len
 #include "portable.h"
 
 // If your port lacks pvPortCalloc, provide it HERE (and remove from puffernet.c), or vice versa.
@@ -35,48 +35,59 @@ static inline void *pvPortCalloc(size_t n, size_t size) {
 // ---- Weights handling -------------------------------------------------------
 
 static inline void init_weights(Weights* w) {
-    // Assume drone_weights is a contiguous float blob in little-endian IEEE754.
-    // Cast to const float*; size is in number of floats.
+    // Binary blob is a contiguous float buffer (IEEE754, little-endian)
     w->data = (const float *)(const void *)src_puffer_drone_swarm_weights_bin;
-    // If you also have a length in bytes, prefer that:
-    // w->size = (int)(drone_weights_len / sizeof(float));
-    w->size = 16420/4;
+    w->size = (int)(src_puffer_drone_swarm_weights_bin_len / sizeof(float));
     w->idx  = 0;
 }
 
 static Weights g_weights_storage;
 static Weights* g_weights = NULL;
 
-// Safe float read helper (not strictly needed once we cast above)
-static inline float weight_at(const Weights* w, size_t i) {
-    // Bounds are the caller’s responsibility; add asserts if you want.
-    return w->data[i];
+// ---- Small helpers -----------------------------------------------------------
+
+typedef struct { float w,x,y,z; } Quat;
+typedef struct { float x,y,z;   } Vec3;
+
+static inline float clampf(float val, float min, float max) {
+    if (val < min) return min;
+    if (val > max) return max;
+    return val;
 }
 
-// ---- Small RNG helper -------------------------------------------------------
-
-float randn(float mean, float std) {
-    static int has_spare = 0;
-    static float spare;
-
-    if (has_spare) {
-        has_spare = 0;
-        return mean + std * spare;
-    }
-
-    has_spare = 1;
-    float u, v, s;
-    do {
-        u = 2.0f * rand() / RAND_MAX - 1.0f;
-        v = 2.0f * rand() / RAND_MAX - 1.0f;
-        s = u * u + v * v;
-    } while (s >= 1.0f || s == 0.0f);
-
-    s = sqrtf(-2.0f * logf(s) / s);
-    spare = v * s;
-    return mean + std * (u * s);
+// Normalize (w,x,y,z) with guard + early exit
+static inline void quat_normalize_safe(float *w, float *x, float *y, float *z) {
+    const float eps = 1e-12f, tol = 1e-6f;
+    float n2 = (*w)*(*w) + (*x)*(*x) + (*y)*(*y) + (*z)*(*z);
+    if (n2 < eps) { *w = 1.0f; *x = *y = *z = 0.0f; return; }
+    if (fabsf(n2 - 1.0f) < tol) return;
+    float invn = 1.0f / sqrtf(n2);
+    *w *= invn; *x *= invn; *y *= invn; *z *= invn;
 }
 
+// Rotate a world-frame vector into body frame using q (body→world)
+static inline Vec3 world_to_body_vec(Quat q_body_to_world, Vec3 v_world) {
+    float qw = q_body_to_world.w;
+    float qx = q_body_to_world.x;
+    float qy = q_body_to_world.y;
+    float qz = q_body_to_world.z;
+    quat_normalize_safe(&qw,&qx,&qy,&qz);
+
+    // q^{-1} for world→body
+    float w =  qw, x = -qx, y = -qy, z = -qz;
+
+    // u = 2 * (q_vec × v)
+    float ux = 2.0f*(y*v_world.z - z*v_world.y);
+    float uy = 2.0f*(z*v_world.x - x*v_world.z);
+    float uz = 2.0f*(x*v_world.y - y*v_world.x);
+
+    // v_body = v_world + w*u + q_vec × u
+    Vec3 v_body;
+    v_body.x = v_world.x + w*ux + (y*uz - z*uy);
+    v_body.y = v_world.y + w*uy + (z*ux - x*uz);
+    v_body.z = v_world.z + w*uz + (x*uy - y*ux);
+    return v_body;
+}
 
 // ---- This model wraps PufferNet pieces --------------------------------------
 
@@ -96,16 +107,19 @@ LinearContLSTM *make_linearcontlstm(Weights *weights, int num_agents, int input_
                                     const int logit_sizes[], int num_actions) {
     LinearContLSTM *net = pvPortCalloc(1, sizeof(LinearContLSTM));
     net->num_agents = num_agents;
-    net->obs = pvPortCalloc(num_agents * input_dim, sizeof(float));
+    net->obs = pvPortCalloc((size_t)num_agents * (size_t)input_dim, sizeof(float));
     net->num_actions = logit_sizes[0];
+
+    // weights layout: [log_std(4)] [Linear(26->128)] [Actor(128->4)] [Value(128->1)]
     net->log_std = weights->data;
     weights->idx += net->num_actions;
+
     net->encoder = make_linear(weights, num_agents, input_dim, 128);
     net->gelu1 = make_gelu(num_agents, 128);
+
     int atn_sum = 0;
-    for (int i = 0; i < num_actions; i++) {
-        atn_sum += logit_sizes[i];
-    }
+    for (int i = 0; i < num_actions; i++) atn_sum += logit_sizes[i];
+
     net->actor = make_linear(weights, num_agents, 128, atn_sum);
     net->value_fn = make_linear(weights, num_agents, 128, 1);
     //net->lstm = make_lstm(weights, num_agents, 128, 128);
@@ -125,12 +139,6 @@ void appMain(void) {
   }
 }
 
-//static void generate_dummy_actions(float* actions) {
-//    for (int i = 0; i < 4; i++) {
-//      actions[i] = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
-//    }
-//}
-
 void controllerOutOfTreeInit(void) {
     buffer_ = (int*)pvPortCalloc(1, sizeof(int));
     if (buffer_) buffer_[0] = 10;
@@ -140,7 +148,7 @@ void controllerOutOfTreeInit(void) {
         init_weights(g_weights);
     }
 
-    // Define your action layout for the actor head: e.g., 4 independent Gaussians
+    // Define your action layout for the actor head: e.g., 4 independent outputs
     static const int logit_sizes[1] = {4};
     const int num_actions = 1;
 
@@ -154,21 +162,15 @@ void forward_linearcontlstm(LinearContLSTM *net, float *observations, float *act
     //lstm(net->lstm, net->gelu1->output);
     linear(net->actor, net->gelu1->output);
     //linear(net->value_fn, net->lstm->state_h);
+
+    // Minimal change: use deterministic mean (no sampling)
     for (int i = 0; i < net->num_actions; i++) {
-        float std = expf(net->log_std[i]);
-        float mean = net->actor->output[i];
-        actions[i] = randn(mean, std);
+        actions[i] = net->actor->output[i];
     }
 }
 
 bool controllerOutOfTreeTest(void) {
   return true;
-}
-
-float clampf(float val, float min, float max) {
-    if (val < min) return min;
-    if (val > max) return max;
-    return val;
 }
 
 void controllerOutOfTree(control_t *control, const setpoint_t *setpoint,
@@ -184,46 +186,60 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint,
       return;
   }
 
-  // for now, use dummy actions (or build obs and call forward_*)
-  //generate_dummy_actions(a);
+  // ---------------- Build observation vector (match training) ----------------
 
-  // Build observation vector
-  net->obs[0] = state->velocity.x / 50.0f;
-  net->obs[1] = state->velocity.y / 50.0f;
-  net->obs[2] = state->velocity.z / 50.0f;
+  // (0..2) Linear velocity in BODY frame / 50
+  Vec3 v_world = (Vec3){ state->velocity.x, state->velocity.y, state->velocity.z };
+  Quat q = (Quat){ state->attitudeQuaternion.w, state->attitudeQuaternion.x,
+                   state->attitudeQuaternion.y, state->attitudeQuaternion.z };
+  Vec3 v_body = world_to_body_vec(q, v_world);
+  net->obs[0] = v_body.x / 50.0f;
+  net->obs[1] = v_body.y / 50.0f;
+  net->obs[2] = v_body.z / 50.0f;
 
-  net->obs[3] = sensors->gyro.x / 50.0f / 180.0f * 3.14159265f;
-  net->obs[4] = sensors->gyro.y / 50.0f / 180.0f * 3.14159265f;
-  net->obs[5] = sensors->gyro.z / 50.0f / 180.0f * 3.14159265f;
+  // (3..5) Body rates: deg/s -> rad/s, then /50
+  const float DEG2RAD = 3.14159265358979323846f / 180.0f;
+  net->obs[3] = (sensors->gyro.x * DEG2RAD) / 50.0f;
+  net->obs[4] = (sensors->gyro.y * DEG2RAD) / 50.0f;
+  net->obs[5] = (sensors->gyro.z * DEG2RAD) / 50.0f;
 
-  net->obs[6] = state->attitudeQuaternion.w;
-  net->obs[7] = state->attitudeQuaternion.x;
-  net->obs[8] = state->attitudeQuaternion.y;
-  net->obs[9] = state->attitudeQuaternion.z;
+  // (6..9) Quaternion w,x,y,z
+  // (q already normalized in world_to_body_vec; safe to push as-is)
+  net->obs[6] = q.w;
+  net->obs[7] = q.x;
+  net->obs[8] = q.y;
+  net->obs[9] = q.z;
 
+  // (10..13) Motor feedback (keep as your normalizedForces proxy, unchanged)
   net->obs[10] = control->normalizedForces[0];
   net->obs[11] = control->normalizedForces[1];
   net->obs[12] = control->normalizedForces[2];
   net->obs[13] = control->normalizedForces[3];
-  
-  net->obs[14] = (setpoint->position.x - state->position.x) / 30.0f;
-  net->obs[15] = (setpoint->position.y - state->position.y) / 30.0f;
-  net->obs[16] = (setpoint->position.z - state->position.z) / 10.0f;
 
-  net->obs[17] = clampf(setpoint->position.x - state->position.x, -1.0f, 1.0f);
-  net->obs[18] = clampf(setpoint->position.y - state->position.y, -1.0f, 1.0f);
-  net->obs[19] = clampf(setpoint->position.z - state->position.z, -1.0f, 1.0f);
+  // (14..16) Target deltas / (30,30,10)
+  net->obs[14] = (0.0f - state->position.x) / 30.0f;
+  net->obs[15] = (0.0f - state->position.y) / 30.0f;
+  net->obs[16] = (0.5f - state->position.z) / 10.0f;
 
+  // (17..19) Clamped copies
+  net->obs[17] = clampf(0.0f - state->position.x, -1.0f, 1.0f);
+  net->obs[18] = clampf(0.0f - state->position.y, -1.0f, 1.0f);
+  net->obs[19] = clampf(0.5f - state->position.z, -1.0f, 1.0f);
+
+  // (20..22) Task-normal (unused on hardware; keep zeros)
   net->obs[20] = 0.0f;
   net->obs[21] = 0.0f;
   net->obs[22] = 0.0f;
 
-  net->obs[23] = 0.0f;
-  net->obs[24] = 0.0f;
-  net->obs[25] = 0.0f;
+  // (23..25) Multi-agent features (single drone: zeros)
+  net->obs[23] = 1.0f;
+  net->obs[24] = 1.0f;
+  net->obs[25] = 1.0f;
 
+  // ---------------- Forward pass ----------------
   forward_linearcontlstm(net, net->obs, a);
 
+  // Clamp actions and map to [0,1] (unchanged behavior)
   a[0] = clampf(a[0], -1.0f, 1.0f);
   a[1] = clampf(a[1], -1.0f, 1.0f);
   a[2] = clampf(a[2], -1.0f, 1.0f);
@@ -234,6 +250,4 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint,
   control->normalizedForces[1] = (a[1] + 1.0f) * 0.5f;
   control->normalizedForces[2] = (a[2] + 1.0f) * 0.5f;
   control->normalizedForces[3] = (a[3] + 1.0f) * 0.5f;
-
-  //(actions[i] + 1.0f) * 0.5f;
 }
